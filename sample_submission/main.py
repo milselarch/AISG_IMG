@@ -142,11 +142,10 @@ def main(input_dir, output_file):
 
     # video_filepath = f'{input_dir}/{filename}'
     print(f'WAITING ON FACE EXTRACTOR')
-    with face_all_timer:
-        print(f'EXTRACT SIZE {face_extractor.size}')
+    print(f'EXTRACTOR SIZE {face_extractor.size}')
 
+    with face_all_timer:
         while not face_extractor.is_done:
-            print(f'EXTRACT SIZE {face_extractor.size}')
             handle_face_preds(preds_holder, face_extractor)
             time.sleep(1)
 

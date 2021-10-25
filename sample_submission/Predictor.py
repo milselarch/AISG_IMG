@@ -17,7 +17,6 @@ from AISG.loader import load_video
 from AISG.DeepfakeDetection.FaceExtractor import FaceExtractor
 from AISG.MesoNet.MesoTrainer import MesoTrainer
 from AISG.FakeVoiceTorch.trainer import Trainer as AudioPredictor
-from AISG.ParallelFaceExtract import ParallelFaceExtract
 from AISG.NeuralFaceExtract import NeuralFaceExtract
 
 from Timer import Timer

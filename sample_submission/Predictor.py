@@ -34,9 +34,9 @@ class Predictor(object):
 
         self.audio_predictor = AudioPredictor(
             preload_path='models/AUD-211002-1735.pt',
-            cache_threshold=20, load_dataset=False, use_batch_norm=True,
-            add_aisg=False, use_avs=True, train_version=1,
-            use_cuda=BIG_GPU
+            cache_threshold=20, train_version=1,
+            use_batch_norm=True, add_aisg=False, use_avs=True,
+            load_dataset=False, use_cuda=BIG_GPU
         )
         self.face_predictor = MesoTrainer(
             preload_path='models/MES-211022-0001.pt',
@@ -151,6 +151,8 @@ class Predictor(object):
         print(f'SHOWING ALL VIDEOS')
         for k, filename in enumerate(test_videos):
             print(f'[{k}] - [{filename}]')
+
+        self.extract_audios(test_videos, input_dir, temp_dir)
 
         self.face_all_timer.start()
         self.face_extractor = NeuralFaceExtract()

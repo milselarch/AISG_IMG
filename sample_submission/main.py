@@ -1,4 +1,7 @@
 import time
+
+import torch
+
 import misc
 
 import pandas as pd
@@ -66,18 +69,18 @@ def extract_audios(test_videos, input_dir, out_dir):
             print(f'ERROR CONVERTING {filename}')
             print(result.stderr.decode())
 
-def handle_face_preds(holder, extractor):
+def handle_face_preds(holder, extractor, pbar):
     transform = face_predictor.transform
 
     while True:
         result = extractor.pop()
 
         if result is None:
-            print('RESULT IS NONE')
+            # print('RESULT IS NONE')
             return
 
         filepath, face_image_map = result
-        print('MAP FILEPATH =', filepath)
+        # print('MAP FILEPATH =', filepath)
         name = misc.path_to_name(filepath)
         filename = f'{name}.mp4'
         per_face_pred = []
@@ -92,10 +95,12 @@ def handle_face_preds(holder, extractor):
 
                 pil_image = Image.fromarray(face_image)
                 torch_image = transform(pil_image)
+                torch_image = torch.unsqueeze(torch_image, 0)
                 torch_images.append(torch_image)
 
+            torch_batch = torch.cat(torch_images, 0)
             face_predict_timer.start()
-            preds = face_predictor.predict_images(torch_images)
+            preds = face_predictor.batch_predict(torch_batch)
             face_predict_timer.pause()
 
             face_pred = np.percentile(sorted(preds), 75)
@@ -109,7 +114,9 @@ def handle_face_preds(holder, extractor):
             face_pred = 0.85
 
         print(f'ADD POP RESULT', filepath)
-        print(f'FACE PRED [{name}] = {face_pred}')
+        pbar.n = extractor.completed
+        status = f'FACE PRED [{filename}] = {face_pred}'
+        pbar.set_description(status)
         holder.add_face_pred(filename, face_pred)
 
 def main(input_dir, output_file, temp_dir=None):
@@ -140,9 +147,18 @@ def main(input_dir, output_file, temp_dir=None):
     extract_audios(test_videos, input_dir, temp_dir)
 
     preds_holder = PredictionsHolder(input_dir, output_file)
-    pbar = tqdm(test_videos)
+    # video_filepath = f'{input_dir}/{filename}'
+    print(f'WAITING ON FACE EXTRACTOR')
+    print(f'EXTRACTOR SIZE {face_extractor.size}')
+    face_pbar = tqdm(range(len(test_videos)))
 
-    for filename in pbar:
+    with face_all_timer:
+        while not face_extractor.is_done:
+            handle_face_preds(preds_holder, face_extractor, face_pbar)
+            time.sleep(0.1)
+
+    audio_pbar = tqdm(test_videos)
+    for filename in audio_pbar:
         name = misc.path_to_name(filename)
 
         audio_filepath = f'{temp_dir}/{name}.flac'
@@ -150,19 +166,9 @@ def main(input_dir, output_file, temp_dir=None):
         audio_preds = audio_preds.flatten()
         audio_pred = np.median(audio_preds)
         preds_holder.add_audio_pred(filename, audio_pred)
-        print(f'AUD PRED [{name}] = {audio_pred}')
 
-        with face_all_timer:
-            handle_face_preds(preds_holder, face_extractor)
-
-    # video_filepath = f'{input_dir}/{filename}'
-    print(f'WAITING ON FACE EXTRACTOR')
-    print(f'EXTRACTOR SIZE {face_extractor.size}')
-
-    with face_all_timer:
-        while not face_extractor.is_done:
-            handle_face_preds(preds_holder, face_extractor)
-            time.sleep(1)
+        status = f'AUD PRED [{name}] = {audio_pred}'
+        audio_pbar.set_description(status)
 
     print(f'face time spent: {face_all_timer.total}')
     print(f'face predict time spent: {face_predict_timer.total}')

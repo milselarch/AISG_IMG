@@ -16,11 +16,11 @@ class Timer(object):
 
     def __enter__(self):
         self.start()
-        return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        # warning: returning True in __exit__
+        # WILL SUPPRESS ALL ERRORS
         self.pause()
-        return self
 
     def start(self):
         self.start_time = time.perf_counter()

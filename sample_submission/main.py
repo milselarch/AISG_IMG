@@ -24,7 +24,7 @@ from PredictionsHolder import PredictionsHolder
 vram_gb = misc.get_gpu_capacity()
 BIG_GPU = True if vram_gb > 12 else False
 print(f'GPU VRAM = {vram_gb}GB, USE-GPU [{BIG_GPU}]')
-print('VERSION 0.0.3')
+print('VERSION 0.0.4')
 
 face_all_timer = Timer()
 face_predict_timer = Timer()
@@ -45,30 +45,33 @@ face_predictor = MesoTrainer(
 # input('TEST ')
 
 def extract_audios(test_videos, input_dir, out_dir):
+    if input_dir.endswith('/'):
+        input_dir = input_dir[:-1]
+
     pbar = tqdm(test_videos)
 
     for filename in pbar:
         pbar.set_description(f'extracting {filename}')
-        filepath = f'{input_dir}{filename}'
+        filepath = f'{input_dir}/{filename}'
         name = filename[:filename.index('.')]
 
         ffmpeg_args = '-ab 160k -ac 2 -ar 44100'
         out_path = f'{out_dir}/{name}.flac'
-        subprocess.run(
-            f'ffmpeg -i {filepath} {ffmpeg_args} -vn {out_path}',
-            capture_output=True, shell=True
-        )
+        cmd = f'ffmpeg -i -y {filepath} {ffmpeg_args} -vn {out_path}'
+        subprocess.run(cmd, capture_output=True, shell=True)
 
 def handle_face_preds(holder, extractor):
     transform = face_predictor.transform
 
     while True:
         result = extractor.pop()
+
         if result is None:
+            print('RESULT IS NONE')
             return
 
         filepath, face_image_map = result
-        # print('MAP FILEPATH =', filepath)
+        print('MAP FILEPATH =', filepath)
         name = misc.path_to_name(filepath)
         filename = f'{name}.mp4'
         per_face_pred = []
@@ -77,14 +80,17 @@ def handle_face_preds(holder, extractor):
             face_images = face_image_map[face_no]
             torch_images = []
 
-            for face in face_images:
+            for frame_no in face_images:
+                face = face_images[frame_no]
                 face_image = face.image
+
                 pil_image = Image.fromarray(face_image)
                 torch_image = transform(pil_image)
                 torch_images.append(torch_image)
 
-            with face_predict_timer:
-                preds = face_predictor.predict_images(torch_images)
+            face_predict_timer.start()
+            preds = face_predictor.predict_images(torch_images)
+            face_predict_timer.pause()
 
             face_pred = np.percentile(sorted(preds), 75)
             print(f'F-PRED {face_pred}')
@@ -96,6 +102,7 @@ def handle_face_preds(holder, extractor):
             print(f'FACELESS {filename}')
             face_pred = 0.85
 
+        print(f'ADD POP RESULT', filepath)
         print(f'FACE PRED [{name}] = {face_pred}')
         holder.add_face_pred(filename, face_pred)
 
@@ -112,7 +119,7 @@ def main(input_dir, output_file):
     for k, filename in enumerate(test_videos):
         print(f'[{k}] - [{filename}]')
 
-    temp_dir = 'temp'
+    temp_dir = f'{os.getcwd()}/temp'
     face_extractor = ParallelFaceExtract()
     face_extractor.start(filepaths=test_videos, base_dir=input_dir)
     extract_audios(test_videos, input_dir, temp_dir)
@@ -136,9 +143,12 @@ def main(input_dir, output_file):
     # video_filepath = f'{input_dir}/{filename}'
     print(f'WAITING ON FACE EXTRACTOR')
     with face_all_timer:
+        print(f'EXTRACT SIZE {face_extractor.size}')
+
         while not face_extractor.is_done:
+            print(f'EXTRACT SIZE {face_extractor.size}')
             handle_face_preds(preds_holder, face_extractor)
-            time.sleep(0.1)
+            time.sleep(1)
 
     print(f'face time spent: {face_all_timer.total}')
     print(f'face predict time spent: {face_predict_timer.total}')

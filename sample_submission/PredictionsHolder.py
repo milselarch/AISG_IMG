@@ -1,4 +1,5 @@
 import misc
+import pandas as pd
 
 class PredictionsHolder(object):
     def __init__(self, input_dir, output_file):
@@ -42,13 +43,23 @@ class PredictionsHolder(object):
         return True
 
     def add_face_pred(self, filepath, pred):
+        name = misc.path_to_name(filepath)
+        filename = f'{name}.mp4'
+        self.face_preds[filename] = pred
+
         print(f'U-ADD FACE PRED {filepath} {pred}')
-        self.face_preds[filepath] = pred
+        # print(f'faces: {self.face_preds}')
+        # print(f'audios: {self.audio_preds}')
         self.update(filepath)
 
     def add_audio_pred(self, filepath, pred):
+        name = misc.path_to_name(filepath)
+        filename = f'{name}.mp4'
+        self.audio_preds[filename] = pred
+
         print(f'U-ADD AUDIO PRED {filepath} {pred}')
-        self.audio_preds[filepath] = pred
+        # print(f'faces: {self.face_preds}')
+        # print(f'audios: {self.audio_preds}')
         self.update(filepath)
 
     def export(self):

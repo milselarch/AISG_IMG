@@ -24,7 +24,7 @@ from PredictionsHolder import PredictionsHolder
 vram_gb = misc.get_gpu_capacity()
 BIG_GPU = True if vram_gb > 12 else False
 print(f'GPU VRAM = {vram_gb}GB, USE-GPU [{BIG_GPU}]')
-print('VERSION 0.0.4')
+print('VERSION 0.0.8')
 
 face_all_timer = Timer()
 face_predict_timer = Timer()
@@ -55,10 +55,16 @@ def extract_audios(test_videos, input_dir, out_dir):
         filepath = f'{input_dir}/{filename}'
         name = filename[:filename.index('.')]
 
-        ffmpeg_args = '-ab 160k -ac 2 -ar 44100'
         out_path = f'{out_dir}/{name}.flac'
-        cmd = f'ffmpeg -i -y {filepath} {ffmpeg_args} -vn {out_path}'
-        subprocess.run(cmd, capture_output=True, shell=True)
+        ffmpeg_args = '-ab 160k -y -ac 2 -ar 44100'
+        cmd = f'ffmpeg -i {filepath} {ffmpeg_args} -vn {out_path}'
+        result = subprocess.run(
+            cmd, capture_output=True, shell=True
+        )
+
+        if result.returncode != 0:
+            print(f'ERROR CONVERTING {filename}')
+            print(result.stderr.decode())
 
 def handle_face_preds(holder, extractor):
     transform = face_predictor.transform
@@ -106,10 +112,20 @@ def handle_face_preds(holder, extractor):
         print(f'FACE PRED [{name}] = {face_pred}')
         holder.add_face_pred(filename, face_pred)
 
-def main(input_dir, output_file):
+def main(input_dir, output_file, temp_dir=None):
+    output_dir = output_file[:output_file.rindex('/')]
+    print(f'output dir {output_dir}')
+
+    if temp_dir is None:
+        temp_dir = f'{output_dir}/temp'
+
+    if not os.path.exists(temp_dir):
+        os.mkdir(temp_dir)
+
     # read input directory for mp4 videos only
     # note: all files would be mp4 videos in the mounted input dir
     print(f'INPUT DIR {input_dir}')
+
     test_videos = [
         video for video in os.listdir(input_dir)
         if ".mp4" in video
@@ -119,7 +135,6 @@ def main(input_dir, output_file):
     for k, filename in enumerate(test_videos):
         print(f'[{k}] - [{filename}]')
 
-    temp_dir = f'{os.getcwd()}/temp'
     face_extractor = ParallelFaceExtract()
     face_extractor.start(filepaths=test_videos, base_dir=input_dir)
     extract_audios(test_videos, input_dir, temp_dir)

@@ -24,6 +24,7 @@ from PredictionsHolder import PredictionsHolder
 
 vram_gb = misc.get_gpu_capacity()
 BIG_GPU = True if vram_gb > 12 else False
+FACE_BATCH_SIZE = 64 if BIG_GPU else 16
 print(f'GPU VRAM = {vram_gb}GB, USE-GPU [{BIG_GPU}]')
 print('VERSION 0.0.8')
 
@@ -157,7 +158,8 @@ class Predictor(object):
         self.face_all_timer.start()
         self.face_extractor = NeuralFaceExtract()
         self.face_extractor.process_filepaths(
-            test_videos, every_n_frames=20, batch_size=16,
+            test_videos, every_n_frames=10,
+            batch_size=FACE_BATCH_SIZE,
             callback=self.handle_video_face_preds,
             base_dir=input_dir
         )

@@ -39,9 +39,16 @@ class Predictor(object):
             use_batch_norm=True, add_aisg=False, use_avs=True,
             load_dataset=False, use_cuda=BIG_GPU
         )
+        """
         self.face_predictor = MesoTrainer(
             preload_path='models/MES-211022-0001.pt',
             load_dataset=False, use_cuda=BIG_GPU
+        )
+        """
+        self.face_predictor = MesoTrainer(
+            preload_path='models/E16296960_T0.87_V0.88.pt',
+            load_dataset=False, use_cuda=BIG_GPU,
+            use_inception=True
         )
 
         self.preds_holder = None
@@ -121,7 +128,7 @@ class Predictor(object):
             face_pred = max(per_face_pred)
         else:
             print(f'FACELESS {filename}')
-            face_pred = 0.85
+            face_pred = 0.5
 
         print(f'ADD POP RESULT', filepath)
         # pbar.n = extractor.completed

@@ -128,7 +128,7 @@ class Predictor(object):
             face_pred = max(per_face_pred)
         else:
             print(f'FACELESS {filename}')
-            face_pred = 0.5
+            face_pred = 0.9
 
         print(f'ADD POP RESULT', filepath)
         # pbar.n = extractor.completed

@@ -1,5 +1,12 @@
+import torch.multiprocessing
+
 from Predictor import Predictor
 from argparse import ArgumentParser
+
+try:
+    torch.multiprocessing.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass
 
 def main(input_dir, output_file):
     predictor = Predictor()
@@ -7,6 +14,8 @@ def main(input_dir, output_file):
 
 
 if __name__ == "__main__":
+    torch.multiprocessing.freeze_support()
+
     parser = ArgumentParser()
     parser.add_argument(
         "-input", type=str, required=True,

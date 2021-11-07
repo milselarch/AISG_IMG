@@ -2,17 +2,22 @@ import time
 import torch
 import misc
 
+import torch.multiprocessing as mp
 import pandas as pd
 import subprocess
 import numpy as np
 import nvidia_smi
 import os
 
+from torch.utils import data as data_utils
+from queue import Empty as EmptyQueue
 from argparse import ArgumentParser
 from numpy import random
 from tqdm.auto import tqdm
 from PIL import Image
 
+from AISG.wav2lip import audio
+from AISG.wav2lip.SyncnetTrainer import SyncnetTrainer
 from AISG.loader import load_video
 from AISG.DeepfakeDetection.FaceExtractor import FaceExtractor
 from AISG.MesoNet.MesoTrainer import MesoTrainer
@@ -21,17 +26,27 @@ from AISG.NeuralFaceExtract import NeuralFaceExtract
 
 from Timer import Timer
 from PredictionsHolder import PredictionsHolder
+from Dataset import VideoDataset
+
+try:
+    mp.set_start_method('spawn', force=True)
+except RuntimeError:
+    pass
 
 vram_gb = misc.get_gpu_capacity()
 BIG_GPU = True if vram_gb > 12 else False
 FACE_BATCH_SIZE = 64 if BIG_GPU else 16
+NUM_WORKERS = 6 if BIG_GPU else 2
 print(f'GPU VRAM = {vram_gb}GB, USE-GPU [{BIG_GPU}]')
-print('VERSION 0.0.8')
+print('VERSION 0.1.0')
 
 class Predictor(object):
     def __init__(self):
-        self.face_all_timer = Timer()
+        self.timer = Timer()
         self.face_predict_timer = Timer()
+        self.sync_predict_timer = Timer()
+        self.audio_predict_timer = Timer()
+        self.audio_file_queue = mp.Queue()
 
         self.audio_predictor = AudioPredictor(
             preload_path='models/AUD-211002-1735.pt',
@@ -50,6 +65,11 @@ class Predictor(object):
             load_dataset=False, use_cuda=BIG_GPU,
             use_inception=True
         )
+        self.sync_predictor = SyncnetTrainer(
+            use_cuda=BIG_GPU, load_dataset=False,
+            preload_path='models/lipsync_expert.pth',
+            is_checkpoint=True, strict=False
+        )
 
         self.preds_holder = None
         self.face_extractor = None
@@ -58,13 +78,16 @@ class Predictor(object):
         # input('TEST ')
 
     @staticmethod
-    def extract_audios(test_videos, input_dir, out_dir):
+    def extract_audios(
+        test_videos, input_dir, out_dir,
+        audio_file_queue
+    ):
         if input_dir.endswith('/'):
             input_dir = input_dir[:-1]
 
         pbar = tqdm(test_videos)
 
-        for filename in pbar:
+        for k, filename in enumerate(pbar):
             pbar.set_description(f'extracting {filename}')
             filepath = f'{input_dir}/{filename}'
             name = filename[:filename.index('.')]
@@ -79,6 +102,12 @@ class Predictor(object):
             if result.returncode != 0:
                 print(f'ERROR CONVERTING {filename}')
                 print(result.stderr.decode())
+
+            audio_file_queue.put(filename)
+            print(f'LOAD {k} {filename}')
+
+        audio_file_queue.put('END')
+        print('EXTRACTION DONE')
 
     def handle_face_preds(self, pbar):
         while True:
@@ -96,14 +125,79 @@ class Predictor(object):
     def handle_video_face_preds(
         self, filepath, face_image_map, pbar
     ):
-        transform = self.face_predictor.transform
         # print('MAP FILEPATH =', filepath)
         name = misc.path_to_name(filepath)
         filename = f'{name}.mp4'
+
+        face_pred = self.predict_faces(face_image_map)
+
+        print(f'ADD POP RESULT', filepath)
+        # pbar.n = extractor.completed
+        status = f'FACE PRED [{filename}] = {face_pred}'
+        pbar.set_description(status)
+        self.preds_holder.add_face_pred(filename, face_pred)
+
+    @staticmethod
+    def show_filenames(test_videos):
+        print(f'SHOWING ALL VIDEOS')
+        for k, filename in enumerate(test_videos):
+            print(f'[{k}] - [{filename}]')
+
+    @staticmethod
+    def get_test_videos(input_dir):
+        test_videos = [
+            video for video in os.listdir(input_dir)
+            if ".mp4" in video
+        ]
+        return test_videos
+
+    def fetch_filename(self):
+        while True:
+            try:
+                filename = self.audio_file_queue.get_nowait()
+                if filename is not None:
+                    return filename
+            except EmptyQueue:
+                pass
+
+            time.sleep(1)
+
+    def extract_face_preds(self, test_videos, input_dir):
+        pbar = tqdm(range(len(test_videos)))
+
+        for k in pbar:
+            filename = self.fetch_filename()
+            pbar.update()
+
+            print(f'FF - [{k}/{len(test_videos)}] - {filename}')
+            face_image_map = self.face_extractor.process_filepath(
+                filepath=filename, base_dir=input_dir,
+                every_n_frames=10, batch_size=FACE_BATCH_SIZE,
+            )
+
+            self.handle_video_face_preds(
+                filepath=filename, face_image_map=face_image_map,
+                pbar=pbar
+            )
+
+    def predict_audio(self, audio_arr):
+        # print(type(audio_arr))
+        if isinstance(audio_arr, torch.Tensor):
+            audio_arr = audio_arr.numpy()
+
+        self.audio_predict_timer.start()
+        audio_preds = self.audio_predictor.predict_raw(audio_arr)
+        self.audio_predict_timer.pause()
+        audio_preds = audio_preds.flatten()
+        audio_pred = np.median(audio_preds)
+        return audio_pred
+
+    def predict_faces(self, face_image_map):
+        transform = self.face_predictor.transform
         per_face_pred = []
 
         for face_no in face_image_map:
-            face_images = face_image_map[face_no]
+            face_images = face_image_map.get_detected_frames(face_no)
             torch_images = []
 
             for frame_no in face_images:
@@ -121,20 +215,39 @@ class Predictor(object):
             self.face_predict_timer.pause()
 
             face_pred = np.percentile(sorted(preds), 75)
-            print(f'F-PRED {face_pred}')
             per_face_pred.append(face_pred)
 
         if len(per_face_pred) != 0:
             face_pred = max(per_face_pred)
         else:
             print(f'FACELESS {filename}')
-            face_pred = 0.5
+            face_pred = 0.9
 
-        print(f'ADD POP RESULT', filepath)
-        # pbar.n = extractor.completed
-        status = f'FACE PRED [{filename}] = {face_pred}'
-        pbar.set_description(status)
-        self.preds_holder.add_face_pred(filename, face_pred)
+        return face_pred
+
+    def predict_sync(self, face_image_map, audio_array):
+        if len(face_image_map) == 0:
+            return 0.5
+
+        per_face_pred = []
+
+        for face_no in face_image_map:
+            face_samples = face_image_map.sample_face_frames(
+                face_no, consecutive_frames=5, extract=False
+            )
+            # print(f'FACE SAMPLES, {face_samples}')
+            orig_mel = audio.melspectrogram(audio_array).T
+            self.sync_predict_timer.start()
+            predictions = self.sync_predictor.face_predict(
+                face_samples, orig_mel, fps=face_image_map.fps,
+                to_numpy=True
+            )
+            self.sync_predict_timer.pause()
+            quartile_pred_3 = np.percentile(sorted(predictions), 75)
+            per_face_pred.append(quartile_pred_3)
+
+        sync_pred = min(per_face_pred)
+        return sync_pred
 
     def main(self, input_dir, output_file, temp_dir=None):
         output_dir = output_file[:output_file.rindex('/')]
@@ -149,44 +262,81 @@ class Predictor(object):
         self.preds_holder = PredictionsHolder(input_dir, output_file)
         # read input directory for mp4 videos only
         # note: all files would be mp4 videos in the mounted input dir
+
         print(f'INPUT DIR {input_dir}')
+        test_videos = self.get_test_videos(input_dir)
+        self.show_filenames(test_videos)
 
-        test_videos = [
-            video for video in os.listdir(input_dir)
-            if ".mp4" in video
-        ]
-
-        print(f'SHOWING ALL VIDEOS')
-        for k, filename in enumerate(test_videos):
-            print(f'[{k}] - [{filename}]')
-
-        self.extract_audios(test_videos, input_dir, temp_dir)
-
-        self.face_all_timer.start()
-        self.face_extractor = NeuralFaceExtract()
-        self.face_extractor.process_filepaths(
-            test_videos, every_n_frames=10,
-            batch_size=FACE_BATCH_SIZE,
-            callback=self.handle_video_face_preds,
-            base_dir=input_dir
+        audio_extract_process = mp.Process(
+            target=self.extract_audios,
+            kwargs=misc.kwargify(
+                test_videos=test_videos, input_dir=input_dir,
+                audio_file_queue=self.audio_file_queue,
+                out_dir=temp_dir
+            )
         )
 
-        self.face_all_timer.pause()
+        audio_extract_process.start()
+        # audio_extract_process.join()
+        # self.extract_audios(test_videos, input_dir, temp_dir)
+        # self.face_extractor = NeuralFaceExtract()
+        # self.extract_face_preds(test_videos, input_dir)
+        print('EXTRACTION STARTED')
 
-        audio_pbar = tqdm(test_videos)
-        for filename in audio_pbar:
-            name = misc.path_to_name(filename)
-            audio_filepath = f'{temp_dir}/{name}.flac'
-            audio_preds = self.audio_predictor.batch_predict(
-                audio_filepath
+        video_dataset = VideoDataset(
+            file_queue=self.audio_file_queue,
+            num_files=len(test_videos), input_dir=input_dir,
+            temp_dir=temp_dir, face_batch_size=FACE_BATCH_SIZE,
+            # face_extractor=self.face_extractor
+        )
+
+        print(f'NUM WORKERS {NUM_WORKERS}')
+        data_loader = data_utils.DataLoader(
+            video_dataset, batch_size=None, num_workers=NUM_WORKERS
+        )
+
+        k = 0
+        num_videos = len(test_videos)
+        pbar = tqdm(range(num_videos))
+        self.timer.start()
+
+        for sample in data_loader:
+            if sample is None:
+                print('END SAMPLE')
+                continue
+
+            filename, audio_array, face_image_map = sample
+            audio_pred = self.predict_audio(audio_array)
+            face_pred = self.predict_faces(face_image_map)
+            sync_pred = self.predict_sync(face_image_map, audio_array)
+
+            video_pred = max(
+                audio_pred, face_pred + 0.093, sync_pred - 0.093
             )
 
-            audio_preds = audio_preds.flatten()
-            audio_pred = np.median(audio_preds)
-            self.preds_holder.add_audio_pred(filename, audio_pred)
-            status = f'AUD PRED [{name}] = {audio_pred}'
-            audio_pbar.set_description(status)
+            self.preds_holder.add_pred(filename, video_pred)
+            print(f'PREDICTING [{k}] [{filename}]')
+            print(f'AUD-PRED = {audio_pred}')
+            print(f'FACE-PRED = {face_pred}')
+            print(f'SYNC-PRED = {sync_pred}')
 
-        print(f'face time: {self.face_all_timer.total}')
+            face_status = f'FP={face_pred:2f}'
+            audio_status = f'AP={audio_pred:2f}'
+            sync_status = f'SP={sync_pred:2f}'
+
+            stats = f'{face_status}, {audio_status}, {sync_status}'
+            desc = f'[{k+1}/{num_videos}] [{filename}] {stats}'
+            pbar.set_description(desc)
+            pbar.update()
+            k += 1
+
+        self.timer.pause()
+        print(f'total predict time: {self.timer.total}')
         print(f'face predict time: {self.face_predict_timer.total}')
+        print(f'sync predict time: {self.face_predict_timer.total}')
+        print(f'audio predict time: {self.audio_predict_timer.total}')
         self.preds_holder.export()
+
+
+if __name__ == "__main__":
+    mp.freeze_support()

@@ -3,6 +3,9 @@ import nvidia_smi
 from PIL import Image
 from datetime import datetime
 
+def kwargify(**kwargs):
+    return kwargs
+
 def get_gpu_capacity():
     nvidia_smi.nvmlInit()
     handle = nvidia_smi.nvmlDeviceGetHandleByIndex(0)

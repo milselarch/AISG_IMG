@@ -42,6 +42,10 @@ class PredictionsHolder(object):
         self.probs.append(overall_pred)
         return True
 
+    def add_pred(self, filename, pred):
+        self.filenames.append(filename)
+        self.probs.append(pred)
+
     def add_face_pred(self, filepath, pred):
         name = misc.path_to_name(filepath)
         filename = f'{name}.mp4'

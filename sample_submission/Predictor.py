@@ -36,7 +36,7 @@ except RuntimeError:
 vram_gb = misc.get_gpu_capacity()
 BIG_GPU = True if vram_gb > 12 else False
 FACE_BATCH_SIZE = 64 if BIG_GPU else 16
-NUM_WORKERS = 6 if BIG_GPU else 2
+NUM_WORKERS = 2 if BIG_GPU else 2
 print(f'GPU VRAM = {vram_gb}GB, USE-GPU [{BIG_GPU}]')
 print('VERSION 0.1.0')
 
@@ -214,7 +214,9 @@ class Predictor(object):
             preds = self.face_predictor.batch_predict(torch_batch)
             self.face_predict_timer.pause()
 
-            face_pred = np.percentile(sorted(preds), 75)
+            face_pred_1 = np.percentile(sorted(preds), 75)
+            face_pred_2 = np.median(preds)
+            face_pred = (face_pred_1 + face_pred_2) / 2
             per_face_pred.append(face_pred)
 
         if len(per_face_pred) != 0:
@@ -242,9 +244,14 @@ class Predictor(object):
                 face_samples, orig_mel, fps=face_image_map.fps,
                 to_numpy=True
             )
+
             self.sync_predict_timer.pause()
-            quartile_pred_3 = np.percentile(sorted(predictions), 75)
-            per_face_pred.append(quartile_pred_3)
+            clip = 0.7
+
+            # face_sync_pred = np.percentile(sorted(predictions), 75)
+            face_sync_pred = np.median(predictions)
+            face_sync_pred = (face_sync_pred - clip) / (1.005 - clip)
+            per_face_pred.append(face_sync_pred)
 
         sync_pred = min(per_face_pred)
         return sync_pred
@@ -292,7 +299,8 @@ class Predictor(object):
 
         print(f'NUM WORKERS {NUM_WORKERS}')
         data_loader = data_utils.DataLoader(
-            video_dataset, batch_size=None, num_workers=NUM_WORKERS
+            video_dataset, batch_size=None, num_workers=NUM_WORKERS,
+            pin_memory=False
         )
 
         k = 0
@@ -311,7 +319,7 @@ class Predictor(object):
             sync_pred = self.predict_sync(face_image_map, audio_array)
 
             video_pred = max(
-                audio_pred, face_pred + 0.093, sync_pred - 0.093
+                audio_pred, face_pred, sync_pred
             )
 
             self.preds_holder.add_pred(filename, video_pred)

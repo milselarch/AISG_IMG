@@ -214,16 +214,15 @@ class Predictor(object):
             preds = self.face_predictor.batch_predict(torch_batch)
             self.face_predict_timer.pause()
 
-            face_pred_1 = np.percentile(sorted(preds), 75)
-            face_pred_2 = np.median(preds)
-            face_pred = (face_pred_1 + face_pred_2) / 2
+            face_pred = np.percentile(sorted(preds), 25)
+            print(f'Q1 FACE PRED {face_pred}')
             per_face_pred.append(face_pred)
 
         if len(per_face_pred) != 0:
             face_pred = max(per_face_pred)
         else:
             print(f'FACELESS {filename}')
-            face_pred = 0.9
+            face_pred = 0.85
 
         return face_pred
 
@@ -316,7 +315,8 @@ class Predictor(object):
             filename, audio_array, face_image_map = sample
             audio_pred = self.predict_audio(audio_array)
             face_pred = self.predict_faces(face_image_map)
-            sync_pred = self.predict_sync(face_image_map, audio_array)
+            # sync_pred = self.predict_sync(face_image_map, audio_array)
+            sync_pred = 0
 
             video_pred = max(
                 audio_pred, face_pred, sync_pred

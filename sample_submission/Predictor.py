@@ -7,8 +7,10 @@ import pandas as pd
 import subprocess
 import numpy as np
 import nvidia_smi
+import pickle
 import os
 
+from sklearn.linear_model import LogisticRegression
 from torch.utils import data as data_utils
 from queue import Empty as EmptyQueue
 from argparse import ArgumentParser
@@ -66,10 +68,13 @@ class Predictor(object):
             use_inception=True
         )
         self.sync_predictor = SyncnetTrainer(
-            use_cuda=BIG_GPU, load_dataset=False,
-            preload_path='models/lipsync_expert.pth',
-            is_checkpoint=True, strict=False
+            use_cuda=BIG_GPU, load_dataset=False, use_joon=True,
+            preload_path='models/syncnet_joon.model',
+            is_checkpoint=False, strict=False
         )
+        self.sync_regressor = pickle.load(open(
+            'models/logistic-sync.sav', 'rb'
+        ))
 
         self.preds_holder = None
         self.face_extractor = None
@@ -237,22 +242,32 @@ class Predictor(object):
                 face_no, consecutive_frames=5, extract=False
             )
             # print(f'FACE SAMPLES, {face_samples}')
-            orig_mel = audio.melspectrogram(audio_array).T
             self.sync_predict_timer.start()
-            predictions = self.sync_predictor.face_predict(
-                face_samples, orig_mel, fps=face_image_map.fps,
-                to_numpy=True
+            distances = self.sync_predictor.face_predict_joon(
+                face_samples, audio_array, fps=face_image_map.fps,
+                to_numpy=True, is_raw_audio=True
             )
 
             self.sync_predict_timer.pause()
-            clip = 0.7
 
-            # face_sync_pred = np.percentile(sorted(predictions), 75)
-            face_sync_pred = np.median(predictions)
-            face_sync_pred = (face_sync_pred - clip) / (1.005 - clip)
-            per_face_pred.append(face_sync_pred)
+            mean_pred = np.mean(distances)
+            median_pred = np.median(distances)
+            quartile_pred_3 = np.percentile(sorted(distances), 75)
+            quartile_pred_1 = np.percentile(sorted(distances), 25)
+            pred_batch = np.array([
+                mean_pred, median_pred, quartile_pred_1,
+                quartile_pred_3
+            ])
 
-        sync_pred = min(per_face_pred)
+            per_face_pred.append(pred_batch)
+
+        if len(per_face_pred) == 0:
+            return 0.
+
+        sync_preds = np.min(per_face_pred, axis=0)
+        sync_pred = self.sync_regressor.predict_proba([sync_preds])
+        sync_pred = sync_pred[0][1]
+        sync_pred = sync_pred * 0.95 - 0.05
         return sync_pred
 
     def main(self, input_dir, output_file, temp_dir=None):
@@ -315,8 +330,8 @@ class Predictor(object):
             filename, audio_array, face_image_map = sample
             audio_pred = self.predict_audio(audio_array)
             face_pred = self.predict_faces(face_image_map)
-            # sync_pred = self.predict_sync(face_image_map, audio_array)
-            sync_pred = 0
+            sync_pred = self.predict_sync(face_image_map, audio_array)
+            # sync_pred = 0
 
             video_pred = max(
                 audio_pred, face_pred, sync_pred

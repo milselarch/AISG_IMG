@@ -136,6 +136,7 @@ pycrypto==2.6.1
 pycurl==7.43.0.2
 pydub==0.25.1
 Pygments==2.10.0
+python_speech_features==0.6
 # PyGObject==3.36.0
 PyJWT==1.7.1
 pymacaroons==0.13.0

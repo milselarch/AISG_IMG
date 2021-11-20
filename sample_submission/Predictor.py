@@ -245,7 +245,8 @@ class Predictor(object):
             self.sync_predict_timer.start()
             distances = self.sync_predictor.face_predict_joon(
                 face_samples, audio_array, fps=face_image_map.fps,
-                to_numpy=True, is_raw_audio=True
+                to_numpy=True, is_raw_audio=True,
+                predict_distance=True
             )
 
             self.sync_predict_timer.pause()

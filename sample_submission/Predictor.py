@@ -1,3 +1,5 @@
+import functools
+import sys
 import time
 import torch
 import misc
@@ -13,12 +15,13 @@ import os
 from sklearn.linear_model import LogisticRegression
 from torch.utils import data as data_utils
 from queue import Empty as EmptyQueue
+from tqdm.auto import tqdm as raw_tqdm
 from argparse import ArgumentParser
 from numpy import random
-from tqdm.auto import tqdm
 from PIL import Image
 
 from AISG.wav2lip import audio
+from AISG.FaceImageMap import FaceImageMap
 from AISG.wav2lip.SyncnetTrainer import SyncnetTrainer
 from AISG.loader import load_video
 from AISG.DeepfakeDetection.FaceExtractor import FaceExtractor
@@ -41,6 +44,8 @@ FACE_BATCH_SIZE = 64 if BIG_GPU else 16
 NUM_WORKERS = 2 if BIG_GPU else 2
 print(f'GPU VRAM = {vram_gb}GB, USE-GPU [{BIG_GPU}]')
 print('VERSION 0.1.0')
+
+tqdm = functools.partial(raw_tqdm, file=sys.stdout)
 
 class Predictor(object):
     def __init__(self):
@@ -68,9 +73,10 @@ class Predictor(object):
             use_inception=True
         )
         self.sync_predictor = SyncnetTrainer(
-            use_cuda=BIG_GPU, load_dataset=False, use_joon=True,
+            use_cuda=BIG_GPU, load_dataset=False,
             preload_path='models/syncnet_joon.model',
-            is_checkpoint=False, strict=False
+            is_checkpoint=False, strict=False,
+            use_joon=True, old_joon=True
         )
         self.sync_regressor = pickle.load(open(
             'models/logistic-sync.sav', 'rb'
@@ -93,7 +99,7 @@ class Predictor(object):
         pbar = tqdm(test_videos)
 
         for k, filename in enumerate(pbar):
-            pbar.set_description(f'extracting {filename}')
+            pbar.set_description('extracting', filename)
             filepath = f'{input_dir}/{filename}'
             name = filename[:filename.index('.')]
 
@@ -191,7 +197,15 @@ class Predictor(object):
             audio_arr = audio_arr.numpy()
 
         self.audio_predict_timer.start()
-        audio_preds = self.audio_predictor.predict_raw(audio_arr)
+        audio_preds = self.audio_predictor.predict_raw(
+            audio_arr, no_grad=True, max_batch_size=6
+        )
+        """
+        audio_preds = self.audio_predictor.predict_raw(
+            audio_arr, max_samples=512, min_samples=256,
+            clip_p=0.05
+        )
+        """
         self.audio_predict_timer.pause()
         audio_preds = audio_preds.flatten()
         audio_pred = np.median(audio_preds)
@@ -202,8 +216,10 @@ class Predictor(object):
         per_face_pred = []
 
         for face_no in face_image_map:
-            face_images = face_image_map.get_detected_frames(face_no)
             torch_images = []
+            face_images = face_image_map.sample_detected_frames(
+                face_no, max_samples=32
+            )
 
             for frame_no in face_images:
                 face = face_images[frame_no]
@@ -216,7 +232,9 @@ class Predictor(object):
 
             torch_batch = torch.cat(torch_images, 0)
             self.face_predict_timer.start()
-            preds = self.face_predictor.batch_predict(torch_batch)
+            preds = self.face_predictor.batch_predict(
+                torch_batch, no_grad=True
+            )
             self.face_predict_timer.pause()
 
             face_pred = np.percentile(sorted(preds), 25)
@@ -226,12 +244,12 @@ class Predictor(object):
         if len(per_face_pred) != 0:
             face_pred = max(per_face_pred)
         else:
-            print(f'FACELESS {filename}')
+            print(f'FACELESS')
             face_pred = 0.85
 
         return face_pred
 
-    def predict_sync(self, face_image_map, audio_array):
+    def predict_sync(self, face_image_map: FaceImageMap, audio_array):
         if len(face_image_map) == 0:
             return 0.5
 
@@ -241,7 +259,7 @@ class Predictor(object):
             face_samples = face_image_map.sample_face_frames(
                 face_no, consecutive_frames=5, extract=False
             )
-            # print(f'FACE SAMPLES, {face_samples}')
+            # print('FACE SAMPLES', face_samples)
             self.sync_predict_timer.start()
             distances = self.sync_predictor.face_predict_joon(
                 face_samples, audio_array, fps=face_image_map.fps,
@@ -273,7 +291,7 @@ class Predictor(object):
 
     def main(self, input_dir, output_file, temp_dir=None):
         output_dir = output_file[:output_file.rindex('/')]
-        input_dir = input_dir[:output_file.rindex('/')]
+        # input_dir = input_dir[:input_dir.rindex('/')]
         print(f'output dir {output_dir}')
 
         if temp_dir is None:
@@ -332,7 +350,6 @@ class Predictor(object):
             audio_pred = self.predict_audio(audio_array)
             face_pred = self.predict_faces(face_image_map)
             sync_pred = self.predict_sync(face_image_map, audio_array)
-            # sync_pred = 0
 
             video_pred = max(
                 audio_pred, face_pred, sync_pred
@@ -350,6 +367,7 @@ class Predictor(object):
 
             stats = f'{face_status}, {audio_status}, {sync_status}'
             desc = f'[{k+1}/{num_videos}] [{filename}] {stats}'
+            # desc = f'[{k + 1}/{num_videos}] [{filename}]'
             pbar.set_description(desc)
             pbar.update()
             k += 1

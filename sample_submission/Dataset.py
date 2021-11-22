@@ -1,4 +1,6 @@
 import time
+
+import cv2
 import librosa
 import torch
 import random
@@ -62,10 +64,28 @@ class VideoDataset(object):
         print('filename', filename)
 
         name = filename[:filename.index('.')]
-        face_image_map = self.face_extractor.process_filepath(
-            filepath=filename, base_dir=self.input_dir,
-            batch_size=self.face_batch_size,
-            every_n_frames=1, skip_detect=10, ignore_detect=5
+        filepath = f'{self.input_dir}/{filename}'
+        cap = cv2.VideoCapture(filepath)
+
+        num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        width_in = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height_in = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+        scale = 0.5
+        if min(width_in, height_in) < 700:
+            scale = 1
+
+        if num_frames <= 10 * 24:
+            skip_detect = 5
+        elif num_frames >= 30 * 24:
+            skip_detect = 20
+        else:
+            skip_detect = 10
+
+        face_image_map = self.face_extractor.process_video(
+            cap, batch_size=self.face_batch_size,
+            every_n_frames=1, skip_detect=skip_detect,
+            ignore_detect=5, scale=scale, filepath=filepath
         )
 
         audio_filepath = f'{self.temp_dir}/{name}.flac'

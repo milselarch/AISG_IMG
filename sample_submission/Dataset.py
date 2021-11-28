@@ -19,7 +19,8 @@ except RuntimeError:
 class VideoDataset(object):
     def __init__(
         self, file_queue, num_files, input_dir,
-        temp_dir, face_batch_size, face_extractor=None
+        temp_dir, face_batch_size, face_extractor=None,
+        use_cuda=True
     ):
         self.file_queue = file_queue
         self.face_batch_size = face_batch_size
@@ -28,7 +29,9 @@ class VideoDataset(object):
         self.num_files = num_files
 
         if face_extractor is None:
-            self.face_extractor = NeuralFaceExtract()
+            self.face_extractor = NeuralFaceExtract(
+                use_cuda=use_cuda
+            )
         else:
             self.face_extractor = face_extractor
 

@@ -59,7 +59,7 @@ class Predictor(object):
             preload_path='models/AUD-211002-1735.pt',
             cache_threshold=20, train_version=1,
             use_batch_norm=True, add_aisg=False, use_avs=True,
-            load_dataset=False, use_cuda=BIG_GPU
+            load_dataset=False, use_cuda=True
         )
         """
         self.face_predictor = MesoTrainer(
@@ -198,7 +198,8 @@ class Predictor(object):
 
         self.audio_predict_timer.start()
         audio_preds = self.audio_predictor.predict_raw(
-            audio_arr, no_grad=True, max_batch_size=6
+            audio_arr, no_grad=True, max_batch_size=6,
+            min_samples=256, clip_p=0.1
         )
         """
         audio_preds = self.audio_predictor.predict_raw(
@@ -324,7 +325,7 @@ class Predictor(object):
         print('EXTRACTION STARTED')
 
         video_dataset = VideoDataset(
-            file_queue=self.audio_file_queue,
+            file_queue=self.audio_file_queue, use_cuda=BIG_GPU,
             num_files=len(test_videos), input_dir=input_dir,
             temp_dir=temp_dir, face_batch_size=FACE_BATCH_SIZE,
             # face_extractor=self.face_extractor

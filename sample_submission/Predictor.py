@@ -10,6 +10,7 @@ import subprocess
 import numpy as np
 import nvidia_smi
 import pickle
+import sys
 import os
 
 from sklearn.linear_model import LogisticRegression
@@ -21,8 +22,9 @@ from numpy import random
 from PIL import Image
 
 from AISG.wav2lip import audio
-from AISG.FaceImageMap import FaceImageMap
+from AISG.wav2lip.FaceSamplesHolder import FaceSamplesHolder
 from AISG.wav2lip.SyncnetTrainer import SyncnetTrainer
+from AISG.FaceImageMap import FaceImageMap
 from AISG.loader import load_video
 from AISG.DeepfakeDetection.FaceExtractor import FaceExtractor
 from AISG.MesoNet.MesoTrainer import MesoTrainer
@@ -68,22 +70,26 @@ class Predictor(object):
         )
         """
         self.face_predictor = MesoTrainer(
-            preload_path='models/E16296960_T0.87_V0.88.pt',
+            preload_path='models/MES_E16296960_T0.87_V0.88.pt',
             load_dataset=False, use_cuda=BIG_GPU,
             use_inception=True
         )
         self.sync_predictor = SyncnetTrainer(
             use_cuda=BIG_GPU, load_dataset=False,
-            preload_path='models/syncnet_joon.model',
+            preload_path='models/SYNF_E6143040_T0.77_V0.66.pt',
             is_checkpoint=False, strict=False,
-            use_joon=True, old_joon=True
+            use_joon=True, old_joon=False, pred_ratio=1.0,
+            fcc_list=(512, 128, 32), dropout_p=0.5,
+            eval_mode=True,
+
+            transform_image=False, predict_confidence=False
         )
-        self.sync_regressor = pickle.load(open(
-            'models/logistic-sync.sav', 'rb'
-        ))
 
         self.preds_holder = None
         self.face_extractor = None
+        self.face_batch_size = 32
+
+        self.dataset_use_cuda = True
         # print(os.system('ls -a'))
         # print(os.system('ls /data/input -a'))
         # input('TEST ')
@@ -199,7 +205,7 @@ class Predictor(object):
         self.audio_predict_timer.start()
         audio_preds = self.audio_predictor.predict_raw(
             audio_arr, no_grad=True, max_batch_size=6,
-            min_samples=256, clip_p=0.1
+            min_samples=256, clip_p=0
         )
         """
         audio_preds = self.audio_predictor.predict_raw(
@@ -250,47 +256,46 @@ class Predictor(object):
 
         return face_pred
 
-    def predict_sync(self, face_image_map: FaceImageMap, audio_array):
+    def handle_sync_predict(
+        self, filename, face_image_map: FaceImageMap, audio_array,
+        samples_holder: FaceSamplesHolder
+    ):
         if len(face_image_map) == 0:
-            return 0.5
+            return False
 
-        per_face_pred = []
+        # num_faces = len(face_image_map)
+        cct = self.sync_predictor.load_cct(audio_array)
 
         for face_no in face_image_map:
             face_samples = face_image_map.sample_face_frames(
-                face_no, consecutive_frames=5, extract=False
+                face_no, consecutive_frames=5, extract=False,
+                max_samples=32
             )
-            # print('FACE SAMPLES', face_samples)
-            self.sync_predict_timer.start()
-            distances = self.sync_predictor.face_predict_joon(
-                face_samples, audio_array, fps=face_image_map.fps,
-                to_numpy=True, is_raw_audio=True,
-                predict_distance=True
+            samples_holder.add_face_sample(
+                filename, face_samples=face_samples, mel=cct,
+                face_no=face_no, fps=face_image_map.fps
             )
 
-            self.sync_predict_timer.pause()
+        return True
 
-            mean_pred = np.mean(distances)
-            median_pred = np.median(distances)
-            quartile_pred_3 = np.percentile(sorted(distances), 75)
-            quartile_pred_1 = np.percentile(sorted(distances), 25)
-            pred_batch = np.array([
-                mean_pred, median_pred, quartile_pred_1,
-                quartile_pred_3
-            ])
+    @staticmethod
+    def stderr(message):
+        print(message, file=sys.stderr)
 
-            per_face_pred.append(pred_batch)
+    @staticmethod
+    def collate_sync_preds(sync_video_preds: dict):
+        sync_face_preds = []
 
-        if len(per_face_pred) == 0:
-            return 0.
+        for face_no in sync_video_preds:
+            predictions = sync_video_preds[face_no]
+            sync_face_pred = np.median(predictions)
+            sync_face_preds.append(sync_face_pred)
 
-        sync_preds = np.min(per_face_pred, axis=0)
-        sync_pred = self.sync_regressor.predict_proba([sync_preds])
-        sync_pred = sync_pred[0][1]
-        sync_pred = sync_pred * 0.95 - 0.05
-        return sync_pred
+        video_sync_pred = min(sync_face_preds)
+        return video_sync_pred
 
     def main(self, input_dir, output_file, temp_dir=None):
+        stderr = self.stderr
         output_dir = output_file[:output_file.rindex('/')]
         # input_dir = input_dir[:input_dir.rindex('/')]
         print(f'output dir {output_dir}')
@@ -301,11 +306,17 @@ class Predictor(object):
             os.mkdir(temp_dir)
 
         self.preds_holder = PredictionsHolder(input_dir, output_file)
+        samples_holder = FaceSamplesHolder(
+            predictor=self.sync_predictor,
+            batch_size=self.face_batch_size,
+            timer=self.sync_predict_timer
+        )
+
         # read input directory for mp4 videos only
         # note: all files would be mp4 videos in the mounted input dir
-
         print(f'INPUT DIR {input_dir}')
         test_videos = self.get_test_videos(input_dir)
+        stderr(f'TOTAL TEST VIDEOS: {len(test_videos)}')
         self.show_filenames(test_videos)
 
         audio_extract_process = mp.Process(
@@ -325,7 +336,8 @@ class Predictor(object):
         print('EXTRACTION STARTED')
 
         video_dataset = VideoDataset(
-            file_queue=self.audio_file_queue, use_cuda=BIG_GPU,
+            file_queue=self.audio_file_queue,
+            use_cuda=self.dataset_use_cuda or BIG_GPU,
             num_files=len(test_videos), input_dir=input_dir,
             temp_dir=temp_dir, face_batch_size=FACE_BATCH_SIZE,
             # face_extractor=self.face_extractor
@@ -339,7 +351,6 @@ class Predictor(object):
 
         k = 0
         num_videos = len(test_videos)
-        pbar = tqdm(range(num_videos))
         self.timer.start()
 
         for sample in data_loader:
@@ -350,34 +361,58 @@ class Predictor(object):
             filename, audio_array, face_image_map = sample
             audio_pred = self.predict_audio(audio_array)
             face_pred = self.predict_faces(face_image_map)
-            sync_pred = self.predict_sync(face_image_map, audio_array)
-
-            video_pred = max(
-                audio_pred, face_pred, sync_pred
+            has_sync_samples = self.handle_sync_predict(
+                filename, face_image_map, audio_array,
+                samples_holder=samples_holder
             )
 
+            vid_pred_holder = self.preds_holder[filename]
+            vid_pred_holder.face_pred = face_pred
+            vid_pred_holder.audio_pred = audio_pred
+
+            if not has_sync_samples:
+                vid_pred_holder.sync_pred = 0.5
+
+        samples_holder.flush()
+        sync_preds_map = samples_holder.make_video_preds()
+
+        for filename in sync_preds_map:
+            vid_pred_holder = self.preds_holder[filename]
+            sync_video_preds = sync_preds_map[filename]
+            sync_pred = self.collate_sync_preds(sync_video_preds)
+            vid_pred_holder.sync_pred = sync_pred
+
+        collate_pbar = tqdm(test_videos)
+        print('TEST VIDEOS', test_videos)
+
+        for filename in collate_pbar:
+            vid_pred_holder = self.preds_holder[filename]
+
+            face_pred = vid_pred_holder.face_pred
+            audio_pred = vid_pred_holder.audio_pred
+            sync_pred = vid_pred_holder.sync_pred
+
+            video_pred = max(face_pred, audio_pred, sync_pred)
             self.preds_holder.add_pred(filename, video_pred)
-            print(f'PREDICTING [{k}] [{filename}]')
-            print(f'AUD-PRED = {audio_pred}')
-            print(f'FACE-PRED = {face_pred}')
-            print(f'SYNC-PRED = {sync_pred}')
 
             face_status = f'FP={face_pred:2f}'
             audio_status = f'AP={audio_pred:2f}'
             sync_status = f'SP={sync_pred:2f}'
 
+            print(f'filename [{k+1}]: {filename}')
             stats = f'{face_status}, {audio_status}, {sync_status}'
             desc = f'[{k+1}/{num_videos}] [{filename}] {stats}'
             # desc = f'[{k + 1}/{num_videos}] [{filename}]'
-            pbar.set_description(desc)
-            pbar.update()
+
+            collate_pbar.set_description(desc)
+            collate_pbar.update()
             k += 1
 
         self.timer.pause()
-        print(f'total predict time: {self.timer.total}')
-        print(f'face predict time: {self.face_predict_timer.total}')
-        print(f'sync predict time: {self.face_predict_timer.total}')
-        print(f'audio predict time: {self.audio_predict_timer.total}')
+        stderr(f'total predict time: {self.timer.total}')
+        stderr(f'face predict time: {self.face_predict_timer.total}')
+        stderr(f'sync predict time: {self.face_predict_timer.total}')
+        stderr(f'audio predict time: {self.audio_predict_timer.total}')
         self.preds_holder.export()
 
 

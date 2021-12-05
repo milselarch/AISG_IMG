@@ -1,5 +1,59 @@
 import misc
 import pandas as pd
+import re
+
+class VideoPrediction(object):
+    def __init__(self, filename):
+        self._filename = filename
+        self._face_pred = None
+        self._audio_pred = None
+        self._sync_pred = None
+        
+        # self.default_value = None
+
+    @property
+    def filename(self):
+        return self._filename
+
+    @property
+    def face_pred(self):
+        return self._face_pred
+
+    @face_pred.setter
+    def face_pred(self, pred):
+        assert self._face_pred is None
+        self._face_pred = pred
+
+    @property
+    def audio_pred(self):
+        return self._audio_pred
+
+    @audio_pred.setter
+    def audio_pred(self, pred):
+        assert self._audio_pred is None
+        self._audio_pred = pred
+
+    @property
+    def sync_pred(self):
+        return self._sync_pred
+
+    @sync_pred.setter
+    def sync_pred(self, pred):
+        assert self._sync_pred is None
+        self._sync_pred = pred
+
+    @property
+    def max_pred(self):
+        return max(
+            self.face_pred, self.audio_pred. self.sync_pred
+        )
+
+    def show_stats(self, tag=None):
+        print(f'PREDICTING [{tag}] [{self.filename}]')
+        print(f'AUD-PRED = {self.audio_pred}')
+        print(f'FACE-PRED = {self.face_pred}')
+        print(f'SYNC-PRED = {self.sync_pred}')
+
 
 class PredictionsHolder(object):
     def __init__(self, input_dir, output_file):
@@ -8,77 +62,40 @@ class PredictionsHolder(object):
 
         self.input_dir = input_dir
         self.output_file = output_file
-        self.audio_preds = {}
-        self.face_preds = {}
+        self.predictions = {}
 
         self.filenames = []
         self.probs = []
-
-    def update(self, filepath):
-        name = misc.path_to_name(filepath)
-        filename = f'{name}.mp4'
-
-        # print(f'UPDATE {filename}')
-        # print(f'FACE PREDS {self.face_preds}')
-        # print(f'AUDIO PREDS {self.audio_preds}')
-
-        if filename not in self.face_preds:
-            return False
-        if filename not in self.audio_preds:
-            return False
-
-        audio_pred = self.audio_preds[filename]
-        face_pred = self.face_preds[filename]
-        overall_pred = max(audio_pred, face_pred)
-        del self.audio_preds[filename]
-        del self.face_preds[filename]
-
-        print(f'U-PRED [{filename}] F={face_pred} A={audio_pred}')
-        print(f'uncleared faces: {len(self.face_preds)}')
-        print(f'uncleared audios: {len(self.audio_preds)}')
-        print(f'cleared: {len(self.filenames)}')
-
-        self.filenames.append(filename)
-        self.probs.append(overall_pred)
-        return True
 
     def add_pred(self, filename, pred):
         self.filenames.append(filename)
         self.probs.append(pred)
 
-    def add_face_pred(self, filepath, pred):
-        name = misc.path_to_name(filepath)
-        filename = f'{name}.mp4'
-        self.face_preds[filename] = pred
+    def __iter__(self):
+        for filename in self.predictions:
+            assert type(filename) is str
+            yield filename
 
-        print(f'U-ADD FACE PRED {filepath} {pred}')
-        # print(f'faces: {self.face_preds}')
-        # print(f'audios: {self.audio_preds}')
-        self.update(filepath)
+    def __getitem__(self, filename) -> VideoPrediction:
+        match = re.match('^[a-f0-9]+\\.mp4$', filename)
+        assert match is not None
 
-    def add_audio_pred(self, filepath, pred):
-        name = misc.path_to_name(filepath)
-        filename = f'{name}.mp4'
-        self.audio_preds[filename] = pred
+        if filename not in self.predictions:
+            try:
+                assert filename.endswith('.mp4')
+            except AssertionError as e:
+                raise ValueError(f'BAD FILENAME {filename}')
 
-        print(f'U-ADD AUDIO PRED {filepath} {pred}')
-        # print(f'faces: {self.face_preds}')
-        # print(f'audios: {self.audio_preds}')
-        self.update(filepath)
+            prediction_holder = VideoPrediction(filename)
+            self.predictions[filename] = prediction_holder
+
+        prediction_holder = self.predictions[filename]
+        return prediction_holder
 
     def export(self):
-        print(f'uncleared faces: {self.face_preds}')
-        print(f'uncleared audios: {self.audio_preds}')
         print(f'all exported filenames: {self.filenames}')
         print(f'all exported probs: {self.probs}')
         print(f'cleared: {len(self.filenames)}')
-
-        try:
-            assert len(self.audio_preds) == 0
-            assert len(self.face_preds) == 0
-        except AssertionError as e:
-            print('NOT ALL VIDEOS CLEARED')
-            raise e
 
         # create output
         output_df = pd.DataFrame({

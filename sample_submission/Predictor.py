@@ -50,12 +50,13 @@ print('VERSION 0.1.0')
 tqdm = functools.partial(raw_tqdm, file=sys.stdout)
 
 class Predictor(object):
-    def __init__(self):
+    def __init__(self, seed=42):
         self.timer = Timer()
         self.face_predict_timer = Timer()
         self.sync_predict_timer = Timer()
         self.audio_predict_timer = Timer()
         self.audio_file_queue = mp.Queue()
+        self.use_mouth_image = True
 
         self.audio_predictor = AudioPredictor(
             preload_path='models/AUD-211002-1735.pt',
@@ -74,22 +75,38 @@ class Predictor(object):
             load_dataset=False, use_cuda=BIG_GPU,
             use_inception=True
         )
-        self.sync_predictor = SyncnetTrainer(
-            use_cuda=BIG_GPU, load_dataset=False,
-            preload_path='models/SYNF_E6143040_T0.77_V0.66.pt',
-            is_checkpoint=False, strict=False,
-            use_joon=True, old_joon=False, pred_ratio=1.0,
-            fcc_list=(512, 128, 32), dropout_p=0.5,
-            eval_mode=True,
 
-            transform_image=False, predict_confidence=False
-        )
+        if self.use_mouth_image:
+            self.sync_predictor = SyncnetTrainer(
+                use_cuda=BIG_GPU, load_dataset=False,
+                is_checkpoint=False, strict=False,
+                use_joon=True, old_joon=False, pred_ratio=1.0,
+                fcc_list=(512, 128, 32), dropout_p=0.5,
+                eval_mode=True,
+
+                preload_path='models/SYNM_E10695968_T0.84_V0.69.pt',
+                transform_image=True, predict_confidence=True
+            )
+        else:
+            self.sync_predictor = SyncnetTrainer(
+                use_cuda=BIG_GPU, load_dataset=False,
+                is_checkpoint=False, strict=False,
+                use_joon=True, old_joon=False, pred_ratio=1.0,
+                fcc_list=(512, 128, 32), dropout_p=0.5,
+                eval_mode=True,
+
+                preload_path='models/SYNF_E6143040_T0.77_V0.66.pt',
+                transform_image=False, predict_confidence=False
+            )
 
         self.preds_holder = None
         self.face_extractor = None
         self.face_batch_size = 32
 
-        self.dataset_use_cuda = True
+        self.dataset_use_cuda = False
+        self.seed = seed
+
+        random.seed(seed)
         # print(os.system('ls -a'))
         # print(os.system('ls /data/input -a'))
         # input('TEST ')
@@ -271,7 +288,7 @@ class Predictor(object):
                 face_no, consecutive_frames=5, extract=False,
                 max_samples=32
             )
-            samples_holder.add_face_sample(
+            samples_holder.add_face_samples(
                 filename, face_samples=face_samples, mel=cct,
                 face_no=face_no, fps=face_image_map.fps
             )
@@ -307,15 +324,18 @@ class Predictor(object):
 
         self.preds_holder = PredictionsHolder(input_dir, output_file)
         samples_holder = FaceSamplesHolder(
-            predictor=self.sync_predictor,
+            predictor=self.sync_predictor, garbage_collect_cct=False,
             batch_size=self.face_batch_size,
-            timer=self.sync_predict_timer
+            timer=self.sync_predict_timer,
+            use_mouth_image=self.use_mouth_image,
         )
 
         # read input directory for mp4 videos only
         # note: all files would be mp4 videos in the mounted input dir
         print(f'INPUT DIR {input_dir}')
         test_videos = self.get_test_videos(input_dir)
+        random.shuffle(test_videos)
+
         stderr(f'TOTAL TEST VIDEOS: {len(test_videos)}')
         self.show_filenames(test_videos)
 
@@ -350,6 +370,7 @@ class Predictor(object):
         )
 
         k = 0
+        num_faceless_videos = 0
         num_videos = len(test_videos)
         self.timer.start()
 
@@ -361,6 +382,7 @@ class Predictor(object):
             filename, audio_array, face_image_map = sample
             audio_pred = self.predict_audio(audio_array)
             face_pred = self.predict_faces(face_image_map)
+
             has_sync_samples = self.handle_sync_predict(
                 filename, face_image_map, audio_array,
                 samples_holder=samples_holder
@@ -372,6 +394,7 @@ class Predictor(object):
 
             if not has_sync_samples:
                 vid_pred_holder.sync_pred = 0.5
+                num_faceless_videos += 1
 
         samples_holder.flush()
         sync_preds_map = samples_holder.make_video_preds()
@@ -383,6 +406,7 @@ class Predictor(object):
             vid_pred_holder.sync_pred = sync_pred
 
         collate_pbar = tqdm(test_videos)
+        stderr(f'FACELESS VIDEOS = {num_faceless_videos}')
         print('TEST VIDEOS', test_videos)
 
         for filename in collate_pbar:

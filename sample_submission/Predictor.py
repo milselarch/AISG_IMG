@@ -4,10 +4,11 @@ import time
 import torch
 import misc
 
-import torch.multiprocessing as mp
-import pandas as pd
-import subprocess
+import torch
 import numpy as np
+import pandas as pd
+import torch.multiprocessing as mp
+import subprocess
 import nvidia_smi
 import pickle
 import sys
@@ -62,7 +63,7 @@ class Predictor(object):
             preload_path='models/AUD-211002-1735.pt',
             cache_threshold=20, train_version=1,
             use_batch_norm=True, add_aisg=False, use_avs=True,
-            load_dataset=False, use_cuda=True
+            load_dataset=False, use_cuda=BIG_GPU
         )
         """
         self.face_predictor = MesoTrainer(
@@ -76,16 +77,18 @@ class Predictor(object):
             use_inception=True
         )
 
+        self.sync_rgb_swap = True
+
         if self.use_mouth_image:
             self.sync_predictor = SyncnetTrainer(
                 use_cuda=BIG_GPU, load_dataset=False,
-                is_checkpoint=False, strict=False,
-                use_joon=True, old_joon=False, pred_ratio=1.0,
-                fcc_list=(512, 128, 32), dropout_p=0.5,
-                eval_mode=True,
-
+                use_joon=True, old_joon=False,
                 preload_path='models/SYNM_E10695968_T0.84_V0.69.pt',
-                transform_image=True, predict_confidence=True
+
+                fcc_list=(512, 128, 32),
+                pred_ratio=1.0, dropout_p=0.5,
+                is_checkpoint=False, predict_confidence=True,
+                transform_image=True, eval_mode=False
             )
         else:
             self.sync_predictor = SyncnetTrainer(
@@ -235,7 +238,28 @@ class Predictor(object):
         audio_pred = np.median(audio_preds)
         return audio_pred
 
+    @staticmethod
+    def fetch_percentile(z, values):
+        values = sorted(values)
+
+        for k, value in enumerate(values):
+            if z < value:
+                progress = k / len(values)
+                return progress
+
+        return 1
+
+    @classmethod
+    def get_percentiles(cls, preds, thresholds):
+        all_percentiles = []
+        for threshold in thresholds:
+            percentile = cls.fetch_percentile(threshold, preds)
+            all_percentiles.append(percentile)
+
+        return all_percentiles
+
     def predict_faces(self, face_image_map):
+        self.face_predict_timer.start()
         transform = self.face_predictor.transform
         per_face_pred = []
 
@@ -255,11 +279,9 @@ class Predictor(object):
                 torch_images.append(torch_image)
 
             torch_batch = torch.cat(torch_images, 0)
-            self.face_predict_timer.start()
             preds = self.face_predictor.batch_predict(
                 torch_batch, no_grad=True
             )
-            self.face_predict_timer.pause()
 
             face_pred = np.percentile(sorted(preds), 25)
             print(f'Q1 FACE PRED {face_pred}')
@@ -271,6 +293,7 @@ class Predictor(object):
             print(f'FACELESS')
             face_pred = 0.85
 
+        self.face_predict_timer.pause()
         return face_pred
 
     def handle_sync_predict(
@@ -324,10 +347,11 @@ class Predictor(object):
 
         self.preds_holder = PredictionsHolder(input_dir, output_file)
         samples_holder = FaceSamplesHolder(
-            predictor=self.sync_predictor, garbage_collect_cct=False,
+            predictor=self.sync_predictor,
+            rgb_to_bgr=self.sync_rgb_swap, garbage_collect_cct=False,
             batch_size=self.face_batch_size,
             timer=self.sync_predict_timer,
-            use_mouth_image=self.use_mouth_image,
+            use_mouth_image=self.use_mouth_image
         )
 
         # read input directory for mp4 videos only
@@ -397,16 +421,18 @@ class Predictor(object):
                 num_faceless_videos += 1
 
         samples_holder.flush()
-        sync_preds_map = samples_holder.make_video_preds()
+        all_sync_preds = samples_holder.make_video_preds()
+        sync_preds_map, sync_confs_map = all_sync_preds
 
         for filename in sync_preds_map:
             vid_pred_holder = self.preds_holder[filename]
             sync_video_preds = sync_preds_map[filename]
+            sync_video_confs = sync_confs_map[filename]
             sync_pred = self.collate_sync_preds(sync_video_preds)
             vid_pred_holder.sync_pred = sync_pred
 
         collate_pbar = tqdm(test_videos)
-        stderr(f'FACELESS VIDEOS = {num_faceless_videos}')
+        # stderr(f'FACELESS VIDEOS = {num_faceless_videos}')
         print('TEST VIDEOS', test_videos)
 
         for filename in collate_pbar:
@@ -415,8 +441,10 @@ class Predictor(object):
             face_pred = vid_pred_holder.face_pred
             audio_pred = vid_pred_holder.audio_pred
             sync_pred = vid_pred_holder.sync_pred
+            video_pred = max(
+                face_pred, audio_pred, sync_pred - 0.05
+            )
 
-            video_pred = max(face_pred, audio_pred, sync_pred)
             self.preds_holder.add_pred(filename, video_pred)
 
             face_status = f'FP={face_pred:2f}'
@@ -428,16 +456,35 @@ class Predictor(object):
             desc = f'[{k+1}/{num_videos}] [{filename}] {stats}'
             # desc = f'[{k + 1}/{num_videos}] [{filename}]'
 
+            stderr(desc)
             collate_pbar.set_description(desc)
             collate_pbar.update()
             k += 1
 
         self.timer.pause()
+        self.preds_holder.export()
+
         stderr(f'total predict time: {self.timer.total}')
         stderr(f'face predict time: {self.face_predict_timer.total}')
-        stderr(f'sync predict time: {self.face_predict_timer.total}')
+        stderr(f'sync predict time: {self.sync_predict_timer.total}')
         stderr(f'audio predict time: {self.audio_predict_timer.total}')
-        self.preds_holder.export()
+
+        mem_allocated = torch.cuda.max_memory_allocated()
+        mb_allocated = mem_allocated / (1024 ** 2)
+        stderr(f'CUDA memory allocated: {mb_allocated} MB')
+
+        all_preds = self.preds_holder.export_all_preds()
+        face_preds, audio_preds, sync_preds = all_preds
+        thresholds = [k / 10 for k in range(1, 10)]
+
+        face_cdfs = self.get_percentiles(face_preds, thresholds)
+        audio_cdfs = self.get_percentiles(audio_preds, thresholds)
+        sync_cdfs = self.get_percentiles(sync_preds, thresholds)
+
+        print('thresholds:', thresholds)
+        print('face percentiles:', face_cdfs)
+        print('audio percentiles:', audio_cdfs)
+        print('sync percentiles:', sync_cdfs)
 
 
 if __name__ == "__main__":

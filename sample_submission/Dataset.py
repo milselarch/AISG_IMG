@@ -86,9 +86,9 @@ class VideoDataset(object):
             skip_detect = 10
 
         face_image_map = self.face_extractor.process_video(
-            cap, batch_size=self.face_batch_size,
-            every_n_frames=1, skip_detect=skip_detect,
-            ignore_detect=5, scale=scale, filepath=filepath
+            cap, batch_size=self.face_batch_size, every_n_frames=1,
+            skip_detect=skip_detect, ignore_detect=5,
+            scale=scale, filepath=filepath
         )
 
         audio_filepath = f'{self.temp_dir}/{name}.flac'

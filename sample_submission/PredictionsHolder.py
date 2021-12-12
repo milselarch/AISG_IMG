@@ -1,3 +1,5 @@
+import os.path
+
 import misc
 import pandas as pd
 import re
@@ -77,6 +79,9 @@ class PredictionsHolder(object):
             yield filename
 
     def __getitem__(self, filename) -> VideoPrediction:
+        return self.get(filename)
+
+    def get(self, filename) -> VideoPrediction:
         match = re.match('^[a-f0-9]+\\.mp4$', filename)
         assert match is not None
 
@@ -91,6 +96,34 @@ class PredictionsHolder(object):
 
         prediction_holder = self.predictions[filename]
         return prediction_holder
+
+    def export_all_preds(self):
+        face_preds, audio_preds, sync_preds = [], [], []
+
+        for filename in self.filenames:
+            vid_pred_holder = self.get(filename)
+
+            face_pred = vid_pred_holder.face_pred
+            audio_pred = vid_pred_holder.audio_pred
+            sync_pred = vid_pred_holder.sync_pred
+
+            face_preds.append(face_pred)
+            audio_preds.append(audio_pred)
+            sync_preds.append(sync_pred)
+
+        output_df = pd.DataFrame({
+            'filename': self.filenames,
+            'face_pred': face_preds, 'audio_pred': audio_preds,
+            'sync_pred': sync_preds
+        })
+
+        dirname = os.path.dirname(self.output_file)
+        basename = os.path.basename(self.output_file)
+        export_file = f'{dirname}/debug-{basename}'
+        output_df.to_csv(export_file, index=False)
+        print(f'exported to {export_file}')
+
+        return face_preds, audio_preds, sync_preds
 
     def export(self):
         print(f'all exported filenames: {self.filenames}')

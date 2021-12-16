@@ -5,6 +5,7 @@ import torch
 import misc
 
 import torch
+import traceback
 import numpy as np
 import pandas as pd
 import torch.multiprocessing as mp
@@ -36,6 +37,10 @@ from Timer import Timer
 from PredictionsHolder import PredictionsHolder
 from Dataset import VideoDataset
 
+def stderr(*args, **kwargs):
+    print(*args, **kwargs, file=sys.stderr)
+
+
 try:
     mp.set_start_method('spawn', force=True)
 except RuntimeError:
@@ -46,8 +51,9 @@ BIG_GPU = True if vram_gb > 12 else False
 FACE_BATCH_SIZE = 64 if BIG_GPU else 16
 NUM_WORKERS = 2 if BIG_GPU else 2
 print(f'GPU VRAM = {vram_gb}GB, USE-GPU [{BIG_GPU}]')
-print('VERSION 0.1.0')
+stderr('VERSION 0.3.0')
 
+torch.cuda._lazy_init()
 tqdm = functools.partial(raw_tqdm, file=sys.stdout)
 
 class Predictor(object):
@@ -57,7 +63,6 @@ class Predictor(object):
         self.sync_predict_timer = Timer()
         self.audio_predict_timer = Timer()
         self.audio_file_queue = mp.Queue()
-        self.use_mouth_image = True
 
         self.audio_predictor = AudioPredictor(
             preload_path='models/AUD-211002-1735.pt',
@@ -78,35 +83,14 @@ class Predictor(object):
         )
 
         self.sync_rgb_swap = True
-
-        if self.use_mouth_image:
-            self.sync_predictor = SyncnetTrainer(
-                use_cuda=BIG_GPU, load_dataset=False,
-                use_joon=True, old_joon=False,
-                preload_path='models/SYNM_E10695968_T0.84_V0.69.pt',
-
-                fcc_list=(512, 128, 32),
-                pred_ratio=1.0, dropout_p=0.5,
-                is_checkpoint=False, predict_confidence=True,
-                transform_image=True, eval_mode=False
-            )
-        else:
-            self.sync_predictor = SyncnetTrainer(
-                use_cuda=BIG_GPU, load_dataset=False,
-                is_checkpoint=False, strict=False,
-                use_joon=True, old_joon=False, pred_ratio=1.0,
-                fcc_list=(512, 128, 32), dropout_p=0.5,
-                eval_mode=True,
-
-                preload_path='models/SYNF_E6143040_T0.77_V0.66.pt',
-                transform_image=False, predict_confidence=False
-            )
+        self.use_mouth_image = True
+        self.mel_cache = {}
 
         self.preds_holder = None
         self.face_extractor = None
         self.face_batch_size = 32
 
-        self.dataset_use_cuda = False
+        self.dataset_use_cuda = True
         self.seed = seed
 
         random.seed(seed)
@@ -225,7 +209,7 @@ class Predictor(object):
         self.audio_predict_timer.start()
         audio_preds = self.audio_predictor.predict_raw(
             audio_arr, no_grad=True, max_batch_size=6,
-            min_samples=256, clip_p=0
+            min_samples=256, clip_p=0.1
         )
         """
         audio_preds = self.audio_predictor.predict_raw(
@@ -319,10 +303,6 @@ class Predictor(object):
         return True
 
     @staticmethod
-    def stderr(message):
-        print(message, file=sys.stderr)
-
-    @staticmethod
     def collate_sync_preds(sync_video_preds: dict):
         sync_face_preds = []
 
@@ -334,8 +314,17 @@ class Predictor(object):
         video_sync_pred = min(sync_face_preds)
         return video_sync_pred
 
-    def main(self, input_dir, output_file, temp_dir=None):
-        stderr = self.stderr
+    def main(self, *args, **kwargs):
+        try:
+            self._main(*args, **kwargs)
+        except Exception as e:
+            stderr('EXCEPTION RAiSED')
+            traceback.print_exc()
+            if not BIG_GPU:
+                stderr('RE-RAISING')
+                raise e
+
+    def _main(self, input_dir, output_file, temp_dir=None):
         output_dir = output_file[:output_file.rindex('/')]
         # input_dir = input_dir[:input_dir.rindex('/')]
         print(f'output dir {output_dir}')
@@ -346,19 +335,17 @@ class Predictor(object):
             os.mkdir(temp_dir)
 
         self.preds_holder = PredictionsHolder(input_dir, output_file)
-        samples_holder = FaceSamplesHolder(
-            predictor=self.sync_predictor,
-            rgb_to_bgr=self.sync_rgb_swap, garbage_collect_cct=False,
-            batch_size=self.face_batch_size,
-            timer=self.sync_predict_timer,
-            use_mouth_image=self.use_mouth_image
-        )
 
         # read input directory for mp4 videos only
         # note: all files would be mp4 videos in the mounted input dir
         print(f'INPUT DIR {input_dir}')
         test_videos = self.get_test_videos(input_dir)
         random.shuffle(test_videos)
+
+        # REMOVE THIS FOR ACTUAL
+        # **********************************
+        # test_videos = test_videos[:100]
+        # **********************************
 
         stderr(f'TOTAL TEST VIDEOS: {len(test_videos)}')
         self.show_filenames(test_videos)
@@ -393,10 +380,12 @@ class Predictor(object):
             pin_memory=False
         )
 
-        k = 0
         num_faceless_videos = 0
         num_videos = len(test_videos)
         self.timer.start()
+        real_files = []
+
+        k = 0
 
         for sample in data_loader:
             if sample is None:
@@ -405,32 +394,76 @@ class Predictor(object):
 
             filename, audio_array, face_image_map = sample
             audio_pred = self.predict_audio(audio_array)
-            face_pred = self.predict_faces(face_image_map)
+            mel = self.audio_predictor.cached_mel
+            self.mel_cache[filename] = mel
 
-            has_sync_samples = self.handle_sync_predict(
-                filename, face_image_map, audio_array,
-                samples_holder=samples_holder
-            )
+            face_pred = self.predict_faces(face_image_map)
+            print(f'PRED [{k}] {filename} - {face_pred} {audio_pred}')
 
             vid_pred_holder = self.preds_holder[filename]
             vid_pred_holder.face_pred = face_pred
             vid_pred_holder.audio_pred = audio_pred
 
-            if not has_sync_samples:
-                vid_pred_holder.sync_pred = 0.5
-                num_faceless_videos += 1
+            if (face_pred < 0.5) and (audio_pred < 0.5):
+                real_files.append(filename)
 
-        samples_holder.flush()
-        all_sync_preds = samples_holder.make_video_preds()
-        sync_preds_map, sync_confs_map = all_sync_preds
+            k += 1
 
-        for filename in sync_preds_map:
-            vid_pred_holder = self.preds_holder[filename]
-            sync_video_preds = sync_preds_map[filename]
-            sync_video_confs = sync_confs_map[filename]
-            sync_pred = self.collate_sync_preds(sync_video_preds)
-            vid_pred_holder.sync_pred = sync_pred
+        dist_cache = {}
+        cluster_map = {}
+        sync_fakes = []
+        clip_start, clip_length = 160, 80
+        clip_end = clip_start + clip_length
+        threshold = 17
 
+        if not BIG_GPU:
+            real_files = list(self.mel_cache.keys())
+
+        for filename1 in real_files:
+            if filename1 in sync_fakes:
+                continue
+
+            for filename2 in real_files:
+                if filename1 == filename2:
+                    continue
+                elif filename2 in sync_fakes:
+                    continue
+
+                key = tuple(sorted([filename1, filename2]))
+                if key in dist_cache:
+                    continue
+
+                full_mel1 = self.mel_cache[filename1]
+                full_mel2 = self.mel_cache[filename2]
+                sub_mel1 = full_mel1[clip_start: clip_end]
+                sub_mel2 = full_mel2[clip_start: clip_end]
+                if sub_mel1.shape != sub_mel2.shape:
+                    continue
+
+                distance = np.linalg.norm(sub_mel1 - sub_mel2)
+                print(f'SD {filename1}, {filename2}', distance)
+                print(full_mel1.shape, full_mel2.shape)
+                dist_cache[key] = distance
+
+                vid_pred1 = self.preds_holder[filename1]
+                vid_pred2 = self.preds_holder[filename2]
+
+                if distance < threshold:
+                    if len(full_mel1) < len(full_mel2):
+                        vid_pred1.sync_pred = 0.95
+                        print(f'SYNC FAKE: {filename1}')
+                        sync_fakes.append(filename1)
+                    elif len(full_mel2) < len(full_mel1):
+                        vid_pred2.sync_pred = 0.95
+                        print(f'SYNC FAKE: {filename2}')
+                        sync_fakes.append(filename2)
+
+                    if filename1 not in cluster_map:
+                        cluster_map[filename1] = []
+
+                    cluster_map[filename1].append(filename2)
+
+        k = 0
         collate_pbar = tqdm(test_videos)
         # stderr(f'FACELESS VIDEOS = {num_faceless_videos}')
         print('TEST VIDEOS', test_videos)
@@ -441,9 +474,7 @@ class Predictor(object):
             face_pred = vid_pred_holder.face_pred
             audio_pred = vid_pred_holder.audio_pred
             sync_pred = vid_pred_holder.sync_pred
-            video_pred = max(
-                face_pred, audio_pred, sync_pred - 0.05
-            )
+            video_pred = max(face_pred, audio_pred, sync_pred)
 
             self.preds_holder.add_pred(filename, video_pred)
 
@@ -456,7 +487,7 @@ class Predictor(object):
             desc = f'[{k+1}/{num_videos}] [{filename}] {stats}'
             # desc = f'[{k + 1}/{num_videos}] [{filename}]'
 
-            stderr(desc)
+            # stderr(desc)
             collate_pbar.set_description(desc)
             collate_pbar.update()
             k += 1
@@ -466,7 +497,7 @@ class Predictor(object):
 
         stderr(f'total predict time: {self.timer.total}')
         stderr(f'face predict time: {self.face_predict_timer.total}')
-        stderr(f'sync predict time: {self.sync_predict_timer.total}')
+        # stderr(f'sync predict time: {self.sync_predict_timer.total}')
         stderr(f'audio predict time: {self.audio_predict_timer.total}')
 
         mem_allocated = torch.cuda.max_memory_allocated()

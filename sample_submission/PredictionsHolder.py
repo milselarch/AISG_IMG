@@ -19,6 +19,9 @@ class VideoPrediction(object):
 
     @property
     def face_pred(self):
+        if self._face_pred is None:
+            return 0.0
+
         return self._face_pred
 
     @face_pred.setter
@@ -28,6 +31,9 @@ class VideoPrediction(object):
 
     @property
     def audio_pred(self):
+        if self._audio_pred is None:
+            return 0.0
+
         return self._audio_pred
 
     @audio_pred.setter
@@ -37,6 +43,9 @@ class VideoPrediction(object):
 
     @property
     def sync_pred(self):
+        if self._sync_pred is None:
+            return 0.0
+
         return self._sync_pred
 
     @sync_pred.setter

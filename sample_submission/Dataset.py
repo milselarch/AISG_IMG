@@ -1,4 +1,5 @@
 import time
+import torch
 
 import cv2
 import librosa
@@ -27,6 +28,8 @@ class VideoDataset(object):
         self.input_dir = input_dir
         self.temp_dir = temp_dir
         self.num_files = num_files
+
+        torch.cuda._lazy_init()
 
         if face_extractor is None:
             self.face_extractor = NeuralFaceExtract(

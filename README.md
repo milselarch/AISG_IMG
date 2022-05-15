@@ -1,3 +1,5 @@
+Face extraction / audio cluster + Pytorch neural network training code is at [https://github.com/milselarch/AISG](https://github.com/milselarch/AISG), and exists as a git submodule within the sample_submission folder of this repo.
+
 # AI Singapore Trusted Media Challenge Submission Guide
 
 Participants are to submit a **compressed Docker image in the tar.gz format** onto the [challenge platform](https://trustedmedia.aisingapore.org/competition/aisg/make-submission/). This repository serves as a step by step guide to help participants with creating a valid submission for the Trusted Media Challenge.
